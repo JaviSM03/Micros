@@ -140,7 +140,7 @@ void actualizar_logica_juego(void) {
             break;
 
         case ESTADO_SECUENCIA:
-            if (HAL_GetTick() - tick_referencia >= 300) {
+            if (HAL_GetTick() - tick_referencia >= 1000) {
                 tick_referencia = HAL_GetTick();
                 orden++;
 //cada vez q pase nuestro tiempo dispuesto, sube orden y pasa a la siguiente LED
