@@ -1,0 +1,10 @@
+13:33:43 **** Incremental Build of configuration Debug for project f1_start_reaction ****
+make -j16 all 
+arm-none-eabi-size  f1_start_reaction.elf 
+   text	   data	    bss	    dec	    hex	filename
+  47680	    124	   4324	  52128	   cba0	f1_start_reaction.elf
+Finished building: default.size.stdout
+ 
+
+13:33:43 Build Finished. 0 errors, 0 warnings. (took 240ms)
+

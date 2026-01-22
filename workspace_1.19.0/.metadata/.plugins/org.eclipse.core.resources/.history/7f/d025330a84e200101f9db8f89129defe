@@ -1,0 +1,249 @@
+#include "main.h"
+#include "stm32f4xx_hal.h"
+#include "stdio.h"
+#include "fsm_f1.h"
+#include "lcd_i2c.h"
+
+// --- VARIABLES PRIVADAS (ESTADO DEL JUEGO) ---
+static f1_state_t estado_actual = ESTADO_IDLE;
+static uint8_t ganador = 0; // 0=Nadie, 1=Jugador1, 2=Jugador2
+
+static uint32_t tick_referencia = 0;    // Para contar el tiempo (cronómetro)
+static uint32_t tiempo_espera_azar = 0; // Tiempo aleatorio calculado
+static uint8_t orden = 0;               // Contador de luces del semáforo
+
+static uint8_t nula_init = 0;           // Flag para inicializar salida nula
+static uint32_t tiempo_entrada_estado = 0; // Para contar los 3s de error
+
+// --- VARIABLES NUEVAS PARA EVITAR BLOQUEOS ---
+static uint8_t pantalla_actualizada = 0;      // 0 = Hay que pintar, 1 = Ya pintada
+static uint32_t ultimo_tiempo_reaccion = 0;   // Variable para guardar el tiempo exacto
+
+// Variables para el Buzzer (Sonido no bloqueante)
+static uint32_t tiempo_inicio_buzzer = 0;
+static uint8_t buzzer_activo = 0;
+static uint32_t duracion_buzzer = 0;
+
+// Importamos los periféricos definidos en main.c
+extern ADC_HandleTypeDef hadc1;
+extern TIM_HandleTypeDef htim3;
+
+// --- FUNCIÓN AUXILIAR PARA EL BUZZER ---
+void F1_Sonar_Buzzer(uint16_t tono, uint32_t duracion) {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, tono);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+    tiempo_inicio_buzzer = HAL_GetTick();
+    duracion_buzzer = duracion;
+    buzzer_activo = 1;
+}
+
+// --- INICIALIZACIÓN (RESET DEL JUEGO) ---
+void FSM_F1_Init(void) {
+    estado_actual = ESTADO_IDLE;
+    ganador  = 0;
+    pantalla_actualizada = 0;
+
+    // Apagar todos los LEDs (Rojos y Verdes)
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_RESET);
+
+    // Apagar Buzzer
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+    buzzer_activo = 0;
+
+    // Inicializar Pantalla (Aquí es seguro hacerlo)
+    lcd_init();
+    lcd_clear();
+    lcd_put_cur(0, 0);
+    lcd_send_string(" F1 START GAME ");
+    lcd_put_cur(1, 0);
+    lcd_send_string("Pulse START...");
+}
+
+// --- MÁQUINA DE ESTADOS (BUCLE PRINCIPAL) ---
+void FSM_F1_Update(void) {
+
+    // Gestión automática del silencio del Buzzer
+    if (buzzer_activo && (HAL_GetTick() - tiempo_inicio_buzzer >= duracion_buzzer)) {
+        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+        buzzer_activo = 0;
+    }
+
+    switch (estado_actual) {
+
+        case ESTADO_IDLE:
+            // Leer potenciómetro para aleatoriedad
+            HAL_ADC_Start(&hadc1);
+            if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
+                uint32_t valor_adc = HAL_ADC_GetValue(&hadc1);
+                tiempo_espera_azar = 2000 + valor_adc; // Entre 2 y 6 segundos aprox
+            }
+            HAL_ADC_Stop(&hadc1);
+
+            // Botón Azul (Start)
+            if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+                estado_actual = ESTADO_SECUENCIA;
+                orden = 0;
+                tick_referencia = HAL_GetTick();
+
+                // Actualizar LCD
+                lcd_clear();
+                lcd_send_string("SECUENCIA...");
+            }
+            break;
+
+        case ESTADO_SECUENCIA:
+            // Encender un LED cada segundo
+            if (HAL_GetTick() - tick_referencia >= 1000) {
+                tick_referencia = HAL_GetTick();
+                orden++;
+
+                switch(orden) {
+                    case 1:
+                        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
+                        F1_Sonar_Buzzer(500, 200);
+                        break;
+                    case 2:
+                        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
+                        F1_Sonar_Buzzer(500, 200);
+                        break;
+                    case 3:
+                        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);
+                        F1_Sonar_Buzzer(500, 200);
+                        break;
+                    case 4:
+                        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
+                        F1_Sonar_Buzzer(500, 200);
+                        break;
+                    case 5:
+                        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);
+                        F1_Sonar_Buzzer(900, 800);
+                        // Pasar a esperar el apagón
+                        estado_actual = ESTADO_ESPERA_AZAR;
+                        tick_referencia = HAL_GetTick();
+                        break;
+                }
+            }
+            break;
+
+        case ESTADO_ESPERA_AZAR:
+            // Esperar tiempo aleatorio y apagar todo (SALIDA)
+            if (HAL_GetTick() - tick_referencia >= tiempo_espera_azar) {
+                // APAGÓN DE LUCES
+                HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+                F1_Sonar_Buzzer(1000, 600); // Sonido de salida
+
+                estado_actual = ESTADO_REACCION;
+                tick_referencia = HAL_GetTick(); // Empezamos a contar la reacción
+            }
+            break;
+
+
+        case ESTADO_REACCION:
+            // Aquí solo esperamos. Si nadie pulsa en 5s, reiniciamos.
+            if (HAL_GetTick() - tick_referencia > 5000) {
+                estado_actual = ESTADO_IDLE;
+                FSM_F1_Init();
+            }
+            break;
+
+        case ESTADO_GANADOR:
+            // 1. Encender LED Verde del ganador (Hardware)
+            if (ganador == 1) HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_SET);
+            else HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);
+
+            // 2. Pintar la pantalla (SOLO UNA VEZ)
+            if (pantalla_actualizada == 0) {
+                lcd_clear();
+                lcd_put_cur(0, 0);
+                if (ganador == 1) lcd_send_string(" GANADOR: J1 ");
+                else lcd_send_string(" GANADOR: J2 ");
+
+                char tiempo_str[16];
+                sprintf(tiempo_str, "T: %lu ms", ultimo_tiempo_reaccion);
+                lcd_put_cur(1, 0);
+                lcd_send_string(tiempo_str);
+
+                pantalla_actualizada = 1; // Marcamos como pintada para no repetir
+
+                // Reiniciamos el reloj para contar los 5s de celebración
+                tick_referencia = HAL_GetTick();
+            }
+
+            // 3. Esperar 5 segundos y reiniciar juego
+            if (HAL_GetTick() - tick_referencia > 5000) {
+                FSM_F1_Init();
+            }
+            break;
+
+        case ESTADO_SALIDA_NULA:
+            // Entramos aquí la primera vez tras la trampa
+            if (nula_init == 0) {
+                tiempo_entrada_estado = HAL_GetTick();
+                F1_Sonar_Buzzer(200, 1000); // Sonido feo
+
+                // Escribimos en LCD (Seguro hacerlo aquí)
+                lcd_clear();
+                lcd_put_cur(0,0);
+                lcd_send_string(" SALIDA NULA! ");
+                lcd_put_cur(1,0);
+                if(ganador == 1) lcd_send_string("J1 SE ADELANTO");
+                else lcd_send_string("J2 SE ADELANTO");
+
+                nula_init = 1;
+                tick_referencia = HAL_GetTick(); // Para el parpadeo
+            }
+
+            // Parpadeo Semáforo (Alerta)
+            if (HAL_GetTick() - tick_referencia >= 200) {
+                tick_referencia = HAL_GetTick();
+                HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4);
+            }
+
+            // Salir automáticamente a los 3 seg
+            if (HAL_GetTick() - tiempo_entrada_estado > 3000) {
+                FSM_F1_Init();
+            }
+            // Reset manual con botón azul
+            if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+                FSM_F1_Init();
+            }
+            break;
+    }
+}
+
+// --- GESTIÓN DE INTERRUPCIONES (LOS BOTONES) ---
+// ¡IMPORTANTE!: Aquí NO usamos LCD ni retardos. Solo lógica rápida.
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+
+    // Solo hacemos caso a los botones si el juego está corriendo
+    if (estado_actual == ESTADO_SECUENCIA || estado_actual == ESTADO_ESPERA_AZAR || estado_actual == ESTADO_REACCION) {
+
+        uint8_t jugador_detectado = 0;
+        if (GPIO_Pin == BTN_P1_Pin) jugador_detectado = 1;
+        else if (GPIO_Pin == BTN_P2_Pin) jugador_detectado = 2;
+
+        if (jugador_detectado > 0) {
+
+            // CASO 1: SALIDA NULA (TRAMPA)
+            // Si pulsan antes de que empiece ESTADO_REACCION
+            if (estado_actual == ESTADO_SECUENCIA || estado_actual == ESTADO_ESPERA_AZAR) {
+                estado_actual = ESTADO_SALIDA_NULA;
+                ganador = jugador_detectado;
+                nula_init = 0; // Reiniciar flag para que el main pinte la pantalla
+            }
+
+            // CASO 2: VICTORIA LEGAL
+            else {
+                // Guardamos el tiempo exacto aquí para máxima precisión
+                ultimo_tiempo_reaccion = HAL_GetTick() - tick_referencia;
+
+                estado_actual = ESTADO_GANADOR;
+                ganador = jugador_detectado;
+
+                // Marcamos que la pantalla está "sucia" para que el main loop la pinte
+                pantalla_actualizada = 0;
+            }
+        }
+    }
+}

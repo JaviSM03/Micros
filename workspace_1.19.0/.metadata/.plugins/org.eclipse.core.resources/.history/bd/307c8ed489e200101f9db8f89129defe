@@ -1,0 +1,340 @@
+#include "main.h"
+#include "stm32f4xx_hal.h"
+#include "stdio.h"
+#include "fsm_f1.h"
+#include "lcd_i2c.h"
+
+// ====================================================
+// CONFIGURACIÓN DEL JUEGO
+// ====================================================
+#define PUNTOS_PARA_GANAR 3  // Puntos necesarios para ganar la copa
+
+// ====================================================
+// VARIABLES PRIVADAS (ESTADO INTERNO)
+// ====================================================
+static f1_state_t estado_actual = ESTADO_IDLE;
+static uint8_t ganador = 0; // 0=Nadie, 1=Jugador1, 2=Jugador2
+
+static uint32_t tick_referencia = 0;    // Cronómetro general
+static uint32_t tiempo_espera_azar = 0; // Tiempo aleatorio calculado
+static uint8_t orden = 0;               // Contador de luces del semáforo
+
+static uint8_t nula_init = 0;           // Flag para controlar fases de salida nula
+static uint32_t tiempo_entrada_estado = 0; // Para contar tiempos largos dentro de un estado
+
+// --- MARCADOR ---
+static int puntosJ1 = 0;
+static int puntosJ2 = 0;
+
+// --- GESTIÓN VISUAL Y DE TIEMPOS ---
+static uint8_t pantalla_actualizada = 0;
+static uint32_t ultimo_tiempo_reaccion = 0;
+
+// --- BUZZER (SONIDO NO BLOQUEANTE) ---
+static uint32_t tiempo_inicio_buzzer = 0;
+static uint8_t buzzer_activo = 0;
+static uint32_t duracion_buzzer = 0;
+
+// Importamos los periféricos definidos en main.c
+extern ADC_HandleTypeDef hadc1;
+extern TIM_HandleTypeDef htim3;
+
+// ====================================================
+// FUNCIONES AUXILIARES
+// ====================================================
+
+// Activa el buzzer por un tiempo determinado sin detener el procesador
+void F1_Sonar_Buzzer(uint16_t tono, uint32_t duracion) {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, tono);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+    tiempo_inicio_buzzer = HAL_GetTick();
+    duracion_buzzer = duracion;
+    buzzer_activo = 1;
+}
+
+// Muestra el marcador actual en el LCD
+void F1_Mostrar_Marcador(void) {
+    lcd_clear();
+    lcd_put_cur(0, 0);
+    lcd_send_string("MARCADOR ACTUAL:");
+
+    char marcador_str[16];
+    sprintf(marcador_str, "J1:%d    J2:%d", puntosJ1, puntosJ2);
+    lcd_put_cur(1, 0);
+    lcd_send_string(marcador_str);
+}
+
+// ====================================================
+// INICIALIZACIÓN (RESET DE LA RONDA)
+// ====================================================
+void FSM_F1_Init(void) {
+    estado_actual = ESTADO_IDLE;
+    ganador  = 0;
+    pantalla_actualizada = 0;
+    nula_init = 0;
+
+    // Apagar todos los LEDs (Semáforo y Ganadores)
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_RESET);
+
+    // Apagar Buzzer
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+    buzzer_activo = 0;
+
+    // Pantalla de Inicio
+    lcd_init();
+    lcd_clear();
+    lcd_put_cur(0, 0);
+    lcd_send_string(" F1 START GAME ");
+    lcd_put_cur(1, 0);
+
+    // Si la partida está en curso, mostramos el marcador pequeño
+    if (puntosJ1 > 0 || puntosJ2 > 0) {
+        char msg[16];
+        sprintf(msg, "Score: %d - %d", puntosJ1, puntosJ2);
+        lcd_send_string(msg);
+    } else {
+        lcd_send_string("Pulse START...");
+    }
+}
+
+// ====================================================
+// BUCLE PRINCIPAL (UPDATE)
+// ====================================================
+void FSM_F1_Update(void) {
+
+    // 1. Gestión del Buzzer (Apagado automático)
+    if (buzzer_activo && (HAL_GetTick() - tiempo_inicio_buzzer >= duracion_buzzer)) {
+        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+        buzzer_activo = 0;
+    }
+
+    // 2. Máquina de Estados
+    switch (estado_actual) {
+
+        case ESTADO_IDLE:
+            // Calcular tiempo aleatorio basado en ruido del ADC
+            HAL_ADC_Start(&hadc1);
+            if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
+                // Tiempo entre 2000ms y 6000ms aprox
+                tiempo_espera_azar = 2000 + HAL_ADC_GetValue(&hadc1);
+            }
+            HAL_ADC_Stop(&hadc1);
+
+            // Leer Botón START (PA0)
+            if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+                estado_actual = ESTADO_SECUENCIA;
+                orden = 0;
+                tick_referencia = HAL_GetTick();
+                lcd_clear();
+                lcd_send_string("SECUENCIA...");
+            }
+            break;
+
+        case ESTADO_SECUENCIA:
+            // Encender una luz cada segundo
+            if (HAL_GetTick() - tick_referencia >= 1000) {
+                tick_referencia = HAL_GetTick();
+                orden++;
+
+                switch(orden) {
+                    case 1: HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET); F1_Sonar_Buzzer(500, 200); break;
+                    case 2: HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET); F1_Sonar_Buzzer(500, 200); break;
+                    case 3: HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET); F1_Sonar_Buzzer(500, 200); break;
+                    case 4: HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET); F1_Sonar_Buzzer(500, 200); break;
+                    case 5:
+                        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);
+                        F1_Sonar_Buzzer(900, 800);
+                        // Pasar a esperar el apagón
+                        estado_actual = ESTADO_ESPERA_AZAR;
+                        tick_referencia = HAL_GetTick();
+                        break;
+                }
+            }
+            break;
+
+        case ESTADO_ESPERA_AZAR:
+            // Esperar el tiempo aleatorio y APAGAR TODO (SALIDA)
+            if (HAL_GetTick() - tick_referencia >= tiempo_espera_azar) {
+                HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+                F1_Sonar_Buzzer(1000, 600); // Sonido de salida
+
+                estado_actual = ESTADO_REACCION;
+                tick_referencia = HAL_GetTick(); // Inicio cronómetro reacción
+            }
+            break;
+
+        case ESTADO_REACCION:
+            // Si nadie pulsa en 5 segundos, reiniciamos ronda
+            if (HAL_GetTick() - tick_referencia > 5000) {
+                estado_actual = ESTADO_IDLE;
+                FSM_F1_Init();
+            }
+            break;
+
+        case ESTADO_GANADOR:
+            // --- FASE 1: MOSTRAR GANADOR DE LA RONDA ---
+            if (pantalla_actualizada == 0) {
+                if (ganador == 1) {
+                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_SET);
+                    puntosJ1++;
+                } else {
+                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);
+                    puntosJ2++;
+                }
+
+                lcd_clear();
+                lcd_put_cur(0, 0);
+                if (ganador == 1) lcd_send_string(" GANADOR: J1 ");
+                else lcd_send_string(" GANADOR: J2 ");
+
+                char tiempo_str[16];
+                sprintf(tiempo_str, "T: %lu ms", ultimo_tiempo_reaccion);
+                lcd_put_cur(1, 0);
+                lcd_send_string(tiempo_str);
+
+                pantalla_actualizada = 1;
+                tick_referencia = HAL_GetTick(); // Reset reloj para esperar 3s
+            }
+
+            // --- FASE 2: ESPERAR 3s Y MOSTRAR MARCADOR ---
+            if (pantalla_actualizada == 1 && (HAL_GetTick() - tick_referencia > 3000)) {
+                F1_Mostrar_Marcador();
+                pantalla_actualizada = 2;
+                tick_referencia = HAL_GetTick(); // Reset reloj para esperar otros 3s
+            }
+
+            // --- FASE 3: DECIDIR SI HAY CAMPEÓN O NUEVA RONDA ---
+            if (pantalla_actualizada == 2 && (HAL_GetTick() - tick_referencia > 3000)) {
+                // Comprobamos si alguien ha ganado la COPA
+                if (puntosJ1 >= PUNTOS_PARA_GANAR || puntosJ2 >= PUNTOS_PARA_GANAR) {
+                    estado_actual = ESTADO_JUEGO_TERMINADO;
+                    pantalla_actualizada = 0; // Reset flag para pintar la final
+                } else {
+                    FSM_F1_Init(); // Siguiente ronda
+                }
+            }
+            break;
+
+        case ESTADO_SALIDA_NULA:
+            // --- FASE 1: DETECTAR FALTAS Y RESTAR PUNTOS ---
+            if (nula_init == 0) {
+                tiempo_entrada_estado = HAL_GetTick();
+                tick_referencia = HAL_GetTick();
+                F1_Sonar_Buzzer(200, 1000); // Sonido de error
+
+                if (ganador == 1) {
+                    puntosJ1--;
+                    if(puntosJ1 < 0) puntosJ1 = 0;
+                } else {
+                    puntosJ2--;
+                    if(puntosJ2 < 0) puntosJ2 = 0;
+                }
+
+                lcd_clear();
+                lcd_put_cur(0,0);
+                lcd_send_string(" SALIDA NULA! ");
+                lcd_put_cur(1,0);
+                if(ganador == 1) lcd_send_string("J1 SE ADELANTO");
+                else lcd_send_string("J2 SE ADELANTO");
+
+                nula_init = 1;
+            }
+
+            // --- FASE 2: PARPADEO DE SEMÁFORO ---
+            if (nula_init == 1) {
+                if (HAL_GetTick() - tick_referencia >= 200) {
+                    tick_referencia = HAL_GetTick();
+                    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4);
+                }
+
+                // Tras 3 segundos, mostramos marcador
+                if (HAL_GetTick() - tiempo_entrada_estado > 3000) {
+                    // Apagamos LEDs por seguridad
+                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+
+                    F1_Mostrar_Marcador();
+                    nula_init = 2;
+                    tiempo_entrada_estado = HAL_GetTick(); // Reset reloj para ver marcador
+                }
+            }
+
+            // --- FASE 3: ESPERA VIENDO MARCADOR Y RESET ---
+            if (nula_init == 2) {
+                if (HAL_GetTick() - tiempo_entrada_estado > 3000) {
+                    FSM_F1_Init(); // Siguiente ronda
+                }
+            }
+
+            // Reset manual de emergencia
+            if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+                FSM_F1_Init();
+            }
+            break;
+
+        // --- NUEVO ESTADO: FIN DE LA PARTIDA ---
+        case ESTADO_JUEGO_TERMINADO:
+            if (pantalla_actualizada == 0) {
+                // Sonido de victoria final
+                F1_Sonar_Buzzer(1500, 1500);
+
+                lcd_clear();
+                lcd_put_cur(0, 0);
+                lcd_send_string("!! VICTORIA !!");
+                lcd_put_cur(1, 0);
+
+                if (puntosJ1 >= PUNTOS_PARA_GANAR) {
+                    lcd_send_string("CAMPEON: J1");
+                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_SET); // LED J1 fijo
+                } else {
+                    lcd_send_string("CAMPEON: J2");
+                    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET); // LED J2 fijo
+                }
+
+                pantalla_actualizada = 1;
+                tick_referencia = HAL_GetTick(); // Contamos 5s de celebración
+            }
+
+            // Esperar 5 seg y resetear TODO
+            if (HAL_GetTick() - tick_referencia > 5000) {
+                puntosJ1 = 0;  // RESET PUNTOS
+                puntosJ2 = 0;  // RESET PUNTOS
+                FSM_F1_Init(); // Reinicio total
+            }
+            break;
+    }
+}
+
+// ====================================================
+// INTERRUPCIONES (BOTONES)
+// ====================================================
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+
+    // Solo atendemos botones si el juego está en curso
+    if (estado_actual == ESTADO_SECUENCIA || estado_actual == ESTADO_ESPERA_AZAR || estado_actual == ESTADO_REACCION) {
+
+        uint8_t jugador_detectado = 0;
+
+        // Verifica que estos pines coincidan con tu main.h
+        if (GPIO_Pin == BTN_P1_Pin) jugador_detectado = 1;
+        else if (GPIO_Pin == BTN_P2_Pin) jugador_detectado = 2;
+
+        if (jugador_detectado > 0) {
+
+            // CASO 1: SALIDA NULA (Se adelantó)
+            if (estado_actual == ESTADO_SECUENCIA || estado_actual == ESTADO_ESPERA_AZAR) {
+                estado_actual = ESTADO_SALIDA_NULA;
+                ganador = jugador_detectado;
+                nula_init = 0; // Reiniciar flag para procesar la falta
+            }
+
+            // CASO 2: VICTORIA VÁLIDA (Reacción)
+            else {
+                ultimo_tiempo_reaccion = HAL_GetTick() - tick_referencia;
+                estado_actual = ESTADO_GANADOR;
+                ganador = jugador_detectado;
+                pantalla_actualizada = 0; // Reiniciar flag para procesar victoria
+            }
+        }
+    }
+}

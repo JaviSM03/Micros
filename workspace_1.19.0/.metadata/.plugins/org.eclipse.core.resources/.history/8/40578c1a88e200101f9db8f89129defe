@@ -1,0 +1,21 @@
+#ifndef INC_FSM_F1_H_
+#define INC_FSM_F1_H_
+
+#include "main.h" // Importante para reconocer los pines
+
+// Definición de los estados del juego F1
+typedef enum {
+    ESTADO_IDLE,         // Parrilla de salida (Esperando Start)
+    ESTADO_SECUENCIA,    // Encendido de luces rojas 1-5
+    ESTADO_ESPERA_AZAR,  // Las 5 luces encendidas (Tensión)
+    ESTADO_REACCION,     // ¡Luz verde! (Apagado) -> Medir tiempo
+    ESTADO_GANADOR,      // Mostrar quién ha ganado
+    ESTADO_SALIDA_NULA   // Alguien se adelantó (Penalización)
+	ESTADO_JUEGO_TERMINADO;
+} f1_state_t;
+
+// Funciones públicas
+void FSM_F1_Init(void);   // Para poner valores iniciales
+void FSM_F1_Update(void); // La función que se repite infinitamente
+
+#endif /* INC_FSM_F1_H_ */

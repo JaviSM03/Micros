@@ -1,0 +1,283 @@
+#include "main.h"
+#include "stm32f4xx_hal.h"
+#include "stdio.h"
+#include "fsm_f1.h"
+#include "lcd_i2c.h"
+
+
+// Variables privadas que guarda el estado actual y el ganador
+static f1_state_t estado_actual = ESTADO_IDLE;
+static uint8_t ganador = 0; // 0=Nadie, 1=Jugador1, 2=Jugador2
+
+static uint32_t tick_referencia = 0; // Para contar tiempo sin bloquear
+static uint32_t tiempo_espera_azar = 0; // El tiempo que calcularemos con el ADC
+static uint8_t orden = 0;   // Para saber qué LED toca encender
+
+static uint8_t nula_init = 0; //
+
+static uint32_t tiempo_entrada_estado = 0;
+
+// Variables para controlar el sonido sin bloquear el procesador
+static uint32_t tiempo_inicio_buzzer = 0;
+static uint8_t buzzer_activo = 0;
+static uint32_t duracion_buzzer = 0;
+
+// Importamos los perifericos del main.c
+extern ADC_HandleTypeDef hadc1; // Para el conversor ADC
+extern TIM_HandleTypeDef htim3; // Para el Zumbador (PWM)
+
+// --- FUNCIÓN AUXILIAR PARA SONAR EL BUZZER ---
+// tono: valor entre 0 y 1000 (aprox). duracion: milisegundos
+void F1_Sonar_Buzzer(uint16_t tono, uint32_t duracion) {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, tono); // Configurar "volumen/tono"
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);           // Encender
+    tiempo_inicio_buzzer = HAL_GetTick();
+    duracion_buzzer = duracion;
+    buzzer_activo = 1;
+}
+
+// Inicialización
+void FSM_F1_Init(void) {
+    estado_actual = ESTADO_IDLE;
+    ganador  = 0;
+    // Aquí apagamos todos los LEDs
+    //Leds Rojos
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0,GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1,GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2,GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3,GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4,GPIO_PIN_RESET);
+
+    //Leds Verdes
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6,GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7,GPIO_PIN_RESET);
+
+    // Apagamos buzzer
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+
+    // Inicializamos LCD
+    lcd_init();
+    lcd_clear();
+    lcd_put_cur(0, 0);
+    lcd_send_string(" F1 START GAME ");
+    lcd_put_cur(1, 0);
+    lcd_send_string("Pulse START...");
+
+}
+
+// Máquina de Estados (Se llama continuamente desde el main)
+void FSM_F1_Update(void) {
+
+	//Apagado del buzzer
+	if (buzzer_activo && (HAL_GetTick() - tiempo_inicio_buzzer >= duracion_buzzer)) {
+		HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+	    buzzer_activo = 0;
+	}
+
+    switch (estado_actual) {
+
+		case ESTADO_IDLE:
+					// 1. Leemos el valor del Potenciómetro (ADC) para la dificultad
+					HAL_ADC_Start(&hadc1);                 // Arrancamos el ADC
+					if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) { // Esperamos a que mida
+						uint32_t valor_adc = HAL_ADC_GetValue(&hadc1); // Valor entre 0 y 4095
+
+						// Convertimos ese valor en tiempo (ej: entre 2000ms y 7000ms)
+						tiempo_espera_azar = 2000 + valor_adc;
+					}
+					HAL_ADC_Stop(&hadc1); // Paramos el ADC para ahorrar energía
+
+					// 2. Comprobamos si se pulsa el Botón Azul (User Button - PA0)
+					// Nota: El botón de la placa suele ser 1 cuando se pulsa.
+					if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+						// ¡Arranca la F1!
+						estado_actual = ESTADO_SECUENCIA;
+						orden = 0;          // Reiniciamos contador de luces
+						tick_referencia = HAL_GetTick(); // Guardamos la hora actual
+
+						lcd_clear();
+						lcd_send_string("SECUENCIA...");
+					}
+					break;
+
+		case ESTADO_SECUENCIA:
+					// Calculamos cuánto tiempo ha pasado desde la última acción
+					if (HAL_GetTick() - tick_referencia >= 1000) {
+						tick_referencia = HAL_GetTick(); // Actualizamos la referencia
+						orden++; // Vamos al siguiente paso
+
+						switch(orden) {
+							case 1:
+								HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_SET);
+								F1_Sonar_Buzzer(500, 200);
+								break; // LED 1 ON
+							case 2:
+								HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);
+								F1_Sonar_Buzzer(500, 200);
+								break; // LED 2 ON
+							case 3:
+								HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_SET);
+								F1_Sonar_Buzzer(500, 200);
+								break; // LED 3 ON
+							case 4:
+								HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_SET);
+								F1_Sonar_Buzzer(500, 200);
+								break; // LED 4 ON
+							case 5:
+								HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_SET);
+								F1_Sonar_Buzzer(900, 800); // Pitido más agudo y largo
+
+								// Una vez encendidos los 5, pasamos a la fase de TENSION
+								estado_actual = ESTADO_ESPERA_AZAR;
+								tick_referencia = HAL_GetTick(); // Reiniciamos cronómetro
+								break;
+						}
+					}
+					break;
+
+		case ESTADO_ESPERA_AZAR:
+					// TODO: AQUÍ MÁS ADELANTE PONDREMOS EL CÓDIGO ANTI-TRAMPAS
+					// (Si alguien pulsa botón J1 o J2 ahora -> SALIDA_NULA)
+
+					// Verificamos si ya ha pasado el tiempo aleatorio
+					if (HAL_GetTick() - tick_referencia >= tiempo_espera_azar) {
+
+						// ¡SALIDA! Apagamos todos los LEDs de golpe
+						HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, GPIO_PIN_2, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, GPIO_PIN_3, GPIO_PIN_RESET);
+						HAL_GPIO_WritePin(GPIOC, GPIO_PIN_4, GPIO_PIN_RESET);
+
+						F1_Sonar_Buzzer(1000, 600);
+
+						// Aquí sonaríamos el BUZZER (lo haremos luego)
+
+						estado_actual = ESTADO_REACCION;
+						// Reiniciamos el timer para medir la reacción
+						tick_referencia = HAL_GetTick();
+					}
+					break;
+
+
+		case ESTADO_REACCION:
+		            // Aquí no hacemos casi nada, solo esperar a la Interrupción.
+		            // Si pasan 5 segundos y nadie pulsa, reiniciamos.
+		            if (HAL_GetTick() - tick_referencia > 5000) {
+		                estado_actual = ESTADO_IDLE; // Vuelta al inicio
+		            }
+		            break;
+
+		case ESTADO_GANADOR:
+		            // 1. Asegurar encendido del LED del ganador
+		            if (ganador == 1) HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_SET);
+		            else HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET);
+
+
+		            // 2. Esperar 5 segundos y reiniciar
+		            if (HAL_GetTick() - tick_referencia > 5000) {
+		                // Apagar LEDs verdes antes de salir
+		                HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6 | GPIO_PIN_7, GPIO_PIN_RESET);
+		                FSM_F1_Init();
+		            }
+		            break;
+
+		case ESTADO_SALIDA_NULA:
+		// Lógica de entrada al estado (solo se ejecuta la primera vez)
+			if (nula_init == 0) {
+				tiempo_entrada_estado = HAL_GetTick();
+
+		        // Sonido de error (Grave y molesto)
+		        F1_Sonar_Buzzer(200, 1000);
+
+		        // Mensaje en LCD
+		        lcd_clear();
+		        lcd_put_cur(0,0);
+		        lcd_send_string(" SALIDA NULA! ");
+		        lcd_put_cur(1,0);
+		        if(ganador == 1) lcd_send_string("J1 SE ADELANTO");
+		        else if(ganador == 2) lcd_send_string("J2 SE ADELANTO");
+
+		            nula_init = 1; // Marcamos que ya hemos inicializado
+		        }
+
+		        // Parpadeo rápido de los LEDs Rojos (Semáforo) cada 200ms
+		                        if (HAL_GetTick() - tick_referencia >= 200) {
+		                            tick_referencia = HAL_GetTick();
+		                            HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4);
+		                        }
+
+		                        // A los 3 segundos, reiniciamos automáticamente
+		                        if (HAL_GetTick() - tiempo_entrada_estado > 3000) {
+		                            FSM_F1_Init();
+		                        }
+
+		                        // O si pulsamos Reset manual
+		                        if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+		                            FSM_F1_Init();
+		                        }
+		                        break;
+
+    }
+}
+
+// GESTIÓN DE INTERRUPCIONES
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+
+    //Si estamos en fase de Tensión o Reacción
+	//METER ESTADO ENCENDIENDO LUCES
+    if (estado_actual == ESTADO_SECUENCIA ||estado_actual == ESTADO_ESPERA_AZAR || estado_actual == ESTADO_REACCION) {
+
+        // Verificamos quién ha pulsado
+        if (GPIO_Pin == BTN_P1_Pin) { // Jugador 1 (PC8)
+            if (estado_actual == ESTADO_SECUENCIA || estado_actual == ESTADO_ESPERA_AZAR) {
+                // ¡false start!
+                estado_actual = ESTADO_SALIDA_NULA;
+                ganador = 1; //el j1 se saltó la salida
+                nula_init = 0;
+            } else {
+                // ¡WINNER!
+                estado_actual = ESTADO_GANADOR;
+                ganador = 1;
+
+                lcd_clear();
+                lcd_put_cur(0, 0);
+                lcd_send_string(" GANADOR: J1 ");
+
+                char tiempo_str[16];
+                uint32_t tiempo_reaccion = HAL_GetTick() - tick_referencia;
+                sprintf(tiempo_str, "T: %lu ms", tiempo_reaccion);
+                lcd_put_cur(1, 0);
+                lcd_send_string(tiempo_str);
+
+                tick_referencia = HAL_GetTick(); // Para contar los 5s de espera final
+            }
+        }
+        else if (GPIO_Pin == BTN_P2_Pin) { // Jugador 2 (PC9)
+            if (estado_actual == ESTADO_SECUENCIA || estado_actual == ESTADO_ESPERA_AZAR) {
+                // ¡false start!
+                estado_actual = ESTADO_SALIDA_NULA;
+                ganador = 2; //el j2 se saltó la salida
+                nula_init = 0;
+            } else {
+                // ¡WINNER!
+                estado_actual = ESTADO_GANADOR;
+                ganador = 2;
+
+
+               lcd_clear();
+                lcd_put_cur(0, 0);
+                lcd_send_string(" GANADOR: J2 ");
+
+                char tiempo_str[16];
+                uint32_t tiempo_reaccion = HAL_GetTick() - tick_referencia;
+                sprintf(tiempo_str, "T: %lu ms", tiempo_reaccion);
+                lcd_put_cur(1, 0);
+                lcd_send_string(tiempo_str);
+
+                tick_referencia = HAL_GetTick(); // Para contar los 5s de espera final
+            }
+        }
+    }
+}

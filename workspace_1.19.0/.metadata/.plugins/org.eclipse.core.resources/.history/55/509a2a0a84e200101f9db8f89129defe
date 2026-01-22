@@ -1,0 +1,147 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// --- CONFIGURACIÓN DE PINES Y PANTALLA ---
+// Cambia el 0x27 por 0x3F si tu pantalla no enciende las letras
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const int PIN_BOTON_J1 = 2;  // Pin donde conectas el botón del Jugador 1
+const int PIN_BOTON_J2 = 3;  // Pin donde conectas el botón del Jugador 2
+const int PIN_LED = 8;       // Pin del LED que se enciende para dar la salida
+
+// --- VARIABLES DEL JUEGO ---
+int puntosJ1 = 0;
+int puntosJ2 = 0;
+
+void setup() {
+  // Iniciamos la pantalla
+  lcd.init();
+  lcd.backlight();
+
+  // Configuramos los botones y el LED
+  pinMode(PIN_BOTON_J1, INPUT); // Si usas resistencias pulldown externas
+  pinMode(PIN_BOTON_J2, INPUT);
+  // NOTA: Si no usas resistencias, cambia INPUT por INPUT_PULLUP e invierte la lógica
+
+  pinMode(PIN_LED, OUTPUT);
+
+  // Semilla para que el tiempo sea aleatorio de verdad
+  randomSeed(analogRead(0));
+
+  // Mensaje de bienvenida
+  lcd.setCursor(0, 0);
+  lcd.print("Juego de Reflejos");
+  lcd.setCursor(0, 1);
+  lcd.print("Preparados...");
+  delay(2000);
+}
+
+void loop() {
+  // 1. INICIO DE RONDA
+  lcd.clear();
+  lcd.print("Atentos...");
+  digitalWrite(PIN_LED, LOW); // Aseguramos LED apagado
+
+  // Generamos un tiempo de espera aleatorio entre 2 y 5 segundos
+  long tiempoEspera = random(2000, 5000);
+  long tiempoInicio = millis();
+
+  // 2. ESPERA CON DETECCIÓN DE SALIDA NULA (TRAMPAS)
+  // Mientras esperamos, vigilamos si alguien aprieta antes de tiempo
+  while (millis() - tiempoInicio < tiempoEspera) {
+
+    // Chequeamos si J1 hace trampa
+    if (digitalRead(PIN_BOTON_J1) == HIGH) {
+      procesarSalidaNula(1); // 1 significa Jugador 1
+      return; // Reiniciamos el loop
+    }
+
+    // Chequeamos si J2 hace trampa
+    if (digitalRead(PIN_BOTON_J2) == HIGH) {
+      procesarSalidaNula(2); // 2 significa Jugador 2
+      return; // Reiniciamos el loop
+    }
+  }
+
+  // 3. SEÑAL DE SALIDA (¡YA!)
+  lcd.clear();
+  lcd.setCursor(5, 0);
+  lcd.print("YA!!");
+  digitalWrite(PIN_LED, HIGH); // Encendemos luz
+
+  // 4. ESPERAR A QUE ALGUIEN GANE
+  bool tenemosGanador = false;
+
+  while (!tenemosGanador) {
+    if (digitalRead(PIN_BOTON_J1) == HIGH) {
+      digitalWrite(PIN_LED, LOW); // Apagamos luz
+      procesarGanador(1);
+      tenemosGanador = true;
+    }
+    else if (digitalRead(PIN_BOTON_J2) == HIGH) {
+      digitalWrite(PIN_LED, LOW); // Apagamos luz
+      procesarGanador(2);
+      tenemosGanador = true;
+    }
+  }
+}
+
+// --- FUNCIONES AUXILIARES ---
+
+void procesarGanador(int jugador) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  if (jugador == 1) {
+    lcd.print("Gana Jugador 1!");
+    puntosJ1++; // Sumamos punto
+  } else {
+    lcd.print("Gana Jugador 2!");
+    puntosJ2++; // Sumamos punto
+  }
+  mostrarMarcador();
+}
+
+void procesarSalidaNula(int jugador) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Salida Nula!");
+  lcd.setCursor(0, 1);
+
+  if (jugador == 1) {
+    lcd.print("J1 pierde punto");
+    puntosJ1--;
+    if(puntosJ1 < 0) puntosJ1 = 0; // Evitamos puntos negativos
+  } else {
+    lcd.print("J2 pierde punto");
+    puntosJ2--;
+    if(puntosJ2 < 0) puntosJ2 = 0; // Evitamos puntos negativos
+  }
+
+  // Hacemos parpadear el LED o la pantalla para indicar falta
+  for(int i=0; i<3; i++){
+    lcd.noBacklight(); delay(100);
+    lcd.backlight(); delay(100);
+  }
+
+  mostrarMarcador();
+}
+
+void mostrarMarcador() {
+  delay(2000); // Tiempo para leer quién ganó o falló
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("MARCADOR:");
+
+  lcd.setCursor(0, 1);
+  lcd.print("J1:");
+  lcd.print(puntosJ1);
+
+  lcd.setCursor(8, 1); // Movemos el cursor a la derecha
+  lcd.print("J2:");
+  lcd.print(puntosJ2);
+
+  delay(3000); // Mostramos el marcador por 3 segundos
+  lcd.clear();
+  // El loop() volverá a empezar automáticamente
+}

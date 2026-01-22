@@ -1,0 +1,119 @@
+#include "main.h"
+#include "stm32f4xx_hal.h"
+#include "stdio.h"
+#include "fsm_f1.h"
+#include "lcd_i2c.h"
+
+// ====================================================
+// CONFIGURACIÓN DEL JUEGO
+// ====================================================
+#define PUNTOS_PARA_GANAR 3  // Puntos necesarios para ganar la copa
+
+// ====================================================
+// VARIABLES PRIVADAS (ESTADO INTERNO)
+// ====================================================
+static f1_state_t estado_actual = ESTADO_IDLE;
+static uint8_t ganador = 0; // 0=Nadie, 1=Jugador1, 2=Jugador2
+
+static uint32_t tick_referencia = 0;    // Cronómetro general
+static uint32_t tiempo_espera_azar = 0; // Tiempo aleatorio calculado
+static uint8_t orden = 0;               // Contador de luces del semáforo
+
+static uint8_t nula_init = 0;           // Flag para controlar fases de salida nula
+static uint32_t tiempo_entrada_estado = 0; // Para contar tiempos largos dentro de un estado
+
+// --- MARCADOR ---
+static int puntosJ1 = 0;
+static int puntosJ2 = 0;
+
+// --- GESTIÓN VISUAL Y DE TIEMPOS ---
+static uint8_t pantalla_actualizada = 0;
+static uint32_t ultimo_tiempo_reaccion = 0;
+
+// --- BUZZER (SONIDO NO BLOQUEANTE) ---
+static uint32_t tiempo_inicio_buzzer = 0;
+static uint8_t buzzer_activo = 0;
+static uint32_t duracion_buzzer = 0;
+
+// Importamos los periféricos definidos en main.c
+extern ADC_HandleTypeDef hadc1;
+extern TIM_HandleTypeDef htim3;
+
+// ====================================================
+// FUNCIONES AUXILIARES
+// ====================================================
+
+// Activa el buzzer por un tiempo determinado sin detener el procesador
+void F1_Sonar_Buzzer(uint16_t tono, uint32_t duracion) {
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_3, tono);
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
+    tiempo_inicio_buzzer = HAL_GetTick();
+    duracion_buzzer = duracion;
+    buzzer_activo = 1;
+}
+
+// Muestra el marcador actual en el LCD
+void F1_Mostrar_Marcador(void) {
+    lcd_clear();
+    lcd_put_cur(0, 0);
+    lcd_send_string("MARCADOR ACTUAL:");
+
+    char marcador_str[16];
+    sprintf(marcador_str, "J1:%d    J2:%d", puntosJ1, puntosJ2);
+    lcd_put_cur(1, 0);
+    lcd_send_string(marcador_str);
+}
+
+// ====================================================
+// INICIALIZACIÓN (RESET DE LA RONDA)
+// ====================================================
+void FSM_F1_Init(void) {
+    estado_actual = ESTADO_IDLE;
+    ganador  = 0;
+    pantalla_actualizada = 0;
+    nula_init = 0;
+
+    // Apagar todos los LEDs (Semáforo y Ganadores)
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_RESET);
+
+    // Apagar Buzzer
+    HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+    buzzer_activo = 0;
+
+    // Pantalla de Inicio
+    lcd_init();
+    lcd_clear();
+    lcd_put_cur(0, 0);
+    lcd_send_string(" F1 START GAME ");
+    lcd_put_cur(1, 0);
+
+    // Si la partida está en curso, mostramos el marcador pequeño
+    if (puntosJ1 > 0 || puntosJ2 > 0) {
+        char msg[16];
+        sprintf(msg, "Score: %d - %d", puntosJ1, puntosJ2);
+        lcd_send_string(msg);
+    } else {
+        lcd_send_string("Pulse START...");
+    }
+}
+
+// ====================================================
+// BUCLE PRINCIPAL (UPDATE)
+// ====================================================
+void FSM_F1_Update(void) {
+
+    // 1. Gestión del Buzzer (Apagado automático)
+    if (buzzer_activo && (HAL_GetTick() - tiempo_inicio_buzzer >= duracion_buzzer)) {
+        HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_3);
+        buzzer_activo = 0;
+    }
+
+    // 2. Máquina de Estados
+    switch (estado_actual) {
+
+        case ESTADO_IDLE:
+            // Calcular tiempo aleatorio basado en ruido del ADC
+            HAL_ADC_Start(&hadc1);
+            if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
+                // Tiempo entre 2000ms y

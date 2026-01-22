@@ -1,0 +1,5 @@
+../Core/Src/fsm_f1.c:43:6:F1_Sonar_Buzzer	1
+../Core/Src/fsm_f1.c:51:6:F1_Mostrar_Marcador	1
+../Core/Src/fsm_f1.c:63:6:iniciar_variables_juego	4
+../Core/Src/fsm_f1.c:106:6:actualizar_logica_juego	43
+../Core/Src/fsm_f1.c:329:6:HAL_GPIO_EXTI_Callback	9
